@@ -29,14 +29,11 @@ def get_wikitext2(nsamples: int, seed: int, seqlen: int, tokenizer, jointext: st
 
 
 def get_ptb(nsamples: int, seed: int, seqlen: int, tokenizer, jointext: str):
-	traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
-
+	traindata = load_dataset('ptb_text_only', split='test')
 	trainenc = tokenizer(jointext.join(traindata['sentence']), return_tensors='pt')
-
 	rng = random.Random(seed)
 	trainloader = (rng.randint(0, trainenc.input_ids.shape[1] - seqlen - 1) for _ in range(nsamples))
 	trainloader = [trainenc.input_ids[:, i:i+seqlen] for i in trainloader]
-
 	return trainloader
 
 

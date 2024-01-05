@@ -2,18 +2,20 @@
 import torch.nn as nn 
 import torch
 import transformers 
-from transformers import AutoTokenizer, LlamaForCausalLM
+from transformers import LlamaTokenizer, LlamaForCausalLM
 from datautils import get_dataset
-from time import time
+import time
 from quantize import sdxl_sequential, sdxl_pack
+# Load model directly
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def skip(*args, **kwargs):
 	pass
 
 # params
 
-model = "huggyllama/llama-7b"
-act_order = True
+model = "DevaMalla/llama7b"
+act_order = False
 groupsize = 128
 dataset = "ptb"
 nsamples = 128
@@ -28,17 +30,19 @@ torch.nn.init.kaiming_uniform_ = skip
 torch.nn.init.uniform_ = skip
 torch.nn.init.normal_ = skip
 
-model = LlamaForCausalLM.from_pretrained(model, torch_dtype='auto')
+tokenizer = AutoTokenizer.from_pretrained(model)
+model = AutoModelForCausalLM.from_pretrained(model).cuda()
+
 model.seqlen = 2048
 if act_order and groupsize != -1:
     raise ValueError('Cannot use act_order and groupsize together')
 
 print("FP16 model response")
-model.generate()
+input_ids = tokenizer("Explain what protons and electrons are to me?", return_tensors="pt").to("cuda")
+print(model.generate(**input_ids))
 
 print('Loading model...')
 model.eval()
-tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
 
 print('Loading data...')
 dataloader = get_dataset(dataset, tokenizer, nsamples=nsamples, seed=seed, seqlen=model.seqlen)

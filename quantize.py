@@ -92,12 +92,6 @@ def sdxl_sequential(model, dataloader, vae, tokenizer1, tokenizer2, dataset_clas
 	Args = namedtuple("args", "dataset_class max_token_length resolution debug_dataset")
 	# args = Args(dataset_class, max_token_length, resolution, debug_dataset)
 	# calibration_dataset = train_util.load_arbitrary_dataset(args, [tokenizer1, tokenizer2])
-
-	global inps 
-	inps = [None] * nsamples
-
-	global outs
-	outs = [None] * nsamples
 	
 	# dataloader = torch.utils.data.DataLoader(
     #     calibration_dataset,
@@ -108,37 +102,39 @@ def sdxl_sequential(model, dataloader, vae, tokenizer1, tokenizer2, dataset_clas
 	torch.cuda.empty_cache()
 
 	quantizers = {}
-
 	# Change iteration to running full model and keeping track of inps and outs and running quantization directly in the catcher 
 	
 	# Hijacks Linear Layers in unet, catches input and output and performs quantization
 	# Done instead of iterating through layers and doing it one by one since DMs are not true sequential models
 	# Requires full unet to be in memory; Mostly shouldn't be an issue since DMs can still fit on most consumer grade gpus
 	class LinearQuantizer(nn.Module):
-		def __init__(self, layer: nn.Linear, nsamples, wbits, sym, percdamp, groupsize, act_order):
+		def __init__(self, layer: nn.Linear, batch_size: int, idx: int, quantizers: dict, nsamples, wbits, sym, percdamp, groupsize, act_order):
 			super().__init__()
 			self.layer = layer
+			self.quantizers = quantizers
 			self.nsamples = nsamples
 			self.wbits = wbits
 			self.sym = sym
 			self.percdamp = percdamp
 			self.groupsize = groupsize
 			self.act_order = act_order
+			self.batch_size = batch_size
+			self.idx = idx
 
 		def forward(self, x):
-			inps.append(x)
 			full = {name: m for name, m in self.layer.named_modules() if isinstance(m, nn.Linear)}
 
 			sequential = [list(full.keys())]
-			
+			outs = []
 			# For each subset of linear layers
 			for names in sequential:
 				subset = {n: full[n] for n in names}
 				gptq = {}
 
 				# Prepare a quantizer for each linear layer
+				# Rather than doing it based off module name we do it based off idx since module name is not accessible from inside the linear layer
 				for name in subset:
-					gptq[name] = GPTQ(subset[name])
+					gptq[f"{name}"] = GPTQ(subset[name])
 					gptq[name].quantizer = Quantizer()
 					gptq[name].quantizer.configure(self.wbits, perchannel=True, sym=self.sym, mse=False)
 				
@@ -150,35 +146,35 @@ def sdxl_sequential(model, dataloader, vae, tokenizer1, tokenizer2, dataset_clas
 				handles = []
 				for name in subset:
 					handles.append(subset[name].register_forward_hook(add_batch(name)))
-				for j in range(self.nsamples):
-					outs[j] = self.layer(inps[j]) # TODO: Saving outs doesn't seem needed here?
+				for j in range(self.batch_size): #batch size
+					outs.append(self.layer(x[j].unsqueeze(0))[0])  # TODO: Saving outs doesn't seem needed here?
 				for h in handles:
 					h.remove()
-
+				# Once we add our batches of data to the quantizer we reset the outputs to return the correct dim outputs
+				outs = []
 				# With the data collected, quantize the layers
 				for i, name in enumerate(subset):
 					print(i, name)
 					scale, zero = gptq[name].fasterquant(percdamp=self.percdamp, groupsize=self.groupsize, actorder=self.act_order)
-					quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer, scale, zero)
+					self.quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer, scale, zero)
 					gptq[name].free()
-			
+			outs = []
 			# Save outputs of the layer after quantization, so we can feed them into the next layer
-			for j in range(self.nsamples):
-				outs[j] = self.layer(inps[j].unsqueeze(0))[0]
-
-			# Move the layer back to the CPU, and free up memory
+			for j in range(self.batch_size): #batch size
+				outs.append(self.layer(x[j].unsqueeze(0))[0])
+			# free up memory
 			del gptq 
 			torch.cuda.empty_cache()
-			# return outputs as you would in a normal linear layer
-			return torch.cat([outs])
+			# return output as you would in a normal linear layer
+			return torch.cat(outs)
 	
 	# replace all instances of nn.Linear with our custom class
 	for name, m in model.named_modules():
 		if not isinstance(m, nn.Linear):
 			continue
-
+		
 		# Replace the linear layer with a quantized one
-		newlayer = LinearQuantizer(m, nsamples, wbits, sym, 
+		newlayer = LinearQuantizer(m, 1, quantizers, nsamples, wbits, sym, 
 							 		percdamp, groupsize, act_order)
 		parent_name = name.rsplit('.', 1)[0]
 		parent = model.get_submodule(parent_name)
@@ -255,12 +251,13 @@ def sdxl_sequential(model, dataloader, vae, tokenizer1, tokenizer2, dataset_clas
 			model(batch.to(device))
 		except ValueError:
 			pass
+	# Once we finish running over our dataset we replace our custom linear layers back with the originals
 	return quantizers
 
 
 def sdxl_pack(model, quantizers, wbits: int, groupsize: int):
 	# Find all the quantized layers
-	layers = {name: m for name, m in model.named_modules() if isinstance(m, nn.Linear) or isinstance(m, LoRACompatibleLinear)}
+	layers = {name: m for name, m in model.named_modules() if isinstance(m, nn.Linear)}
 	layers = {n: layers[n] for n in quantizers}
 
 	# Replace all applicable instances of Linear with QuantLinear in the model

@@ -138,7 +138,6 @@ class QuantLoRA(nn.Module):
 		triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=2, num_warps=4),
 	],
 	key=['M', 'N', 'K', 'NO_GROUPS'],
-	nearest_power_of_two=['M', 'N', 'K'],
 	prune_configs_by={
 		'early_config_prune': matmul4_kernel_config_pruner,
 		'perf_model': None,
