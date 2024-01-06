@@ -201,14 +201,15 @@ percdamp = 0.1
 config = AutoConfig.from_pretrained(model)
 tokenizer = AutoTokenizer.from_pretrained(model)
 attn = LlamaAttention(config, 0).cuda()
+model = AutoModelForCausalLM.from_pretrained(model)
 
 print('Loading model...')
 attn.eval()
 
 print('Loading data...')
-dataloader = get_dataset(dataset, tokenizer, nsamples=nsamples, seed=seed, seqlen=2048)
+# dataloader = get_dataset(dataset, tokenizer, nsamples=nsamples, seed=seed, seqlen=2048)
 
-# dataloader = torch.rand(nsamples, 1, 2048).cuda()
+dataloader = torch.rand(nsamples, 1, 2048).cuda()
 
 print('Quantizing...')
 tick = time.time()
