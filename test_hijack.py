@@ -1,17 +1,9 @@
-# Test hijack for transformer models
-import torch.nn as nn 
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 import torch
-import transformers 
-from transformers import LlamaTokenizer, LlamaForCausalLM
-from datautils import get_dataset
-import time
-from quantize import sdxl_sequential, sdxl_pack
-# Load model directly
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
-def skip(*args, **kwargs):
-	pass
-
+import torch.utils.checkpoint
+from torch import nn
+from transformers import AutoConfig
+from gptq import GPTQ, Quantizer
 # params
 
 model = "DevaMalla/llama7b"
@@ -25,34 +17,31 @@ true_sequential = True
 sym = True
 percdamp = 0.1
 
+config = AutoConfig.from_pretrained(model)
+layer = LlamaDecoderLayer(config, 0)
 
-torch.nn.init.kaiming_uniform_ = skip
-torch.nn.init.uniform_ = skip
-torch.nn.init.normal_ = skip
+quantizers = {}
+full = {name: m for name, m in layer.named_modules() if isinstance(m, nn.Linear)}
 
-tokenizer = AutoTokenizer.from_pretrained(model)
-model = AutoModelForCausalLM.from_pretrained(model).cuda()
+sequential = [list(full.keys())]
+outs = []
+idx = 0
+# For each subset of linear layers
+for names in sequential:
+    subset = {n: full[n] for n in names}
+    gptq = {}
 
-model.seqlen = 2048
-if act_order and groupsize != -1:
-    raise ValueError('Cannot use act_order and groupsize together')
+    # Prepare a quantizer for each linear layer
+    for name in subset:
+        print(idx)
+        gptq[idx] = GPTQ(layer) # subset[name] -> linear layer
+        gptq[idx].quantizer = Quantizer()
+        gptq[idx].quantizer.configure(4, perchannel=True, sym=True, mse=False)
 
-print("FP16 model response")
-input_ids = tokenizer("Explain what protons and electrons are to me?", return_tensors="pt").to("cuda")
-print(model.generate(**input_ids))
+    # With the data collected, quantize the layers
+    for i, name in enumerate(subset):
+        print(i, name)
+        quantizers['model.layers.%d' % (i)] = (gptq[idx].quantizer, 0, 0)
+        gptq[idx].free()
 
-print('Loading model...')
-model.eval()
-
-print('Loading data...')
-dataloader = get_dataset(dataset, tokenizer, nsamples=nsamples, seed=seed, seqlen=model.seqlen)
-
-print('Quantizing...')
-tick = time.time()
-quantizers = sdxl_sequential(model, dataloader, None, None, None, None, None, None, None, "cuda", wbits=wbits, nsamples=nsamples, true_sequential=true_sequential, sym=sym, percdamp=percdamp, groupsize=groupsize, act_order=act_order)
-print(f"Total time: {time.time() - tick:.2f}s")
-
-print('Packing...')
-sdxl_pack(model, quantizers, wbits, groupsize)
-
-print('Done.')
+    idx += 1

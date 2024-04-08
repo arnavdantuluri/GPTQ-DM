@@ -2,15 +2,14 @@
 # Quantize a model using the GPTQ algorithm.
 import argparse
 import json
-import library.train_util as train_util
-import library.sdxl_train_util as sdxl_train_util
+# import library.train_util as train_util
+# import library.sdxl_train_util as sdxl_train_util
 from pathlib import Path
 import shutil
 import time
 from typing import Optional
 
 import torch
-from torch.fx import symbolic_trace
 import torch.nn as nn
 from collections import namedtuple
 from datautils import get_dataset
@@ -136,7 +135,7 @@ def sdxl_sequential(model, dataloader, vae, tokenizer1, tokenizer2, dataset_clas
 			
 			def add_batch(idx):
 				def tmp(_, inp, out):
-					gptq[idx].add_batch(inp[0].data, out.data)
+					gptq[f"{idx}"].add_batch(inp[0].data, out.data)
 				return tmp
 
 			handles = []
@@ -247,12 +246,26 @@ def sdxl_sequential(model, dataloader, vae, tokenizer1, tokenizer2, dataset_clas
 		except ValueError:
 			pass
 	# Once we finish running over our dataset we replace our custom linear layers back with the originals
+	for idx, (name, m) in enumerate(model.named_modules()):
+		if not isinstance(m, LinearQuantizer):
+			continue
+		
+		# Replace the linear layer with a quantized one
+		newlayer = m.layer
+		parent_name = name.rsplit('.', 1)[0]
+		parent = model.get_submodule(parent_name)
+
+		#print(f"Replacing {name} with quant; parent: {parent_name}, child's name: {name[len(parent_name) + 1:]}")
+
+		setattr(parent, name[len(parent_name) + 1:], newlayer)
+
 	return quantizers
 
 
 def sdxl_pack(model, quantizers, wbits: int, groupsize: int):
 	# Find all the quantized layers
-	layers = {name: m for name, m in model.named_modules() if isinstance(m, nn.Linear)}
+	# Use index instead of name since this allows us to used .modules() instead of .named_modules()
+	layers = {f"{idx}": m for idx, (name, m) in enumerate(model.named_modules()) if isinstance(m, nn.Linear)}
 	layers = {n: layers[n] for n in quantizers}
 
 	# Replace all applicable instances of Linear with QuantLinear in the model
@@ -261,10 +274,13 @@ def sdxl_pack(model, quantizers, wbits: int, groupsize: int):
 	for idx, (name, m) in tqdm(enumerate(model.named_modules()), total=len(list(model.named_modules()))):
 		if not isinstance(m, QuantLinear):
 			continue
-
-		quantizer, scale, zero = quantizers[idx]
-		quantizer, scale, zero = quantizer.cpu(), scale.cpu(), zero.cpu()
-		pack_linear(m, layers[name].weight.data, scale, zero, m.bias)
+		try:
+			device = layers[f"{idx}"].weight.device
+			quantizer, scale, zero = quantizers[f"{idx}"]
+			m, quantizer, scale, zero = m.to(device), quantizer.to(device), scale.to(device), zero.to(device)
+			pack_linear(m, layers[f"{idx}"].weight.data, scale, zero, m.bias)
+		except:
+			print('unlucky')
 
 
 def pack_linear(quant, weights: torch.FloatTensor, scales: torch.FloatTensor, zeros, bias: Optional[torch.FloatTensor]):

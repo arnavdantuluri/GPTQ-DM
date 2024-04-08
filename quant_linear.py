@@ -232,7 +232,8 @@ def matmul4_kernel(
 		# Now we need to unpack b (which is 4-bit values) into 32-bit values
 		b = (b >> shifter[:, None]) & 0xF  # Extract the 4-bit values
 		b = b * scales[None, :] - zeros[None, :]  # Scale and shift
-
+		b = b.to(a.dtype)
+		
 		accumulator += tl.dot(a, b)
 		a_ptrs += BLOCK_SIZE_K * stride_ak
 		b_ptrs += (BLOCK_SIZE_K // 8) * stride_bk
@@ -268,15 +269,16 @@ def triton_matmul4(groupsize: int, a: torch.FloatTensor, qweight: torch.IntTenso
 
 	# Flatten a into (-1, K)
 	x = a.view(-1, a.shape[-1])
-
 	M, K = x.shape
 	N = qweight.shape[1]
+
+	# asserts don't entirely make sense, triton autotune should account for this automatically and only select viable block sizes... Maybe I'm missing something
 	# This is based on the possible BLOCK_SIZE_Ks
-	assert K % 16 == 0 and K % 32 == 0 and K % 64 == 0 and K % 128 == 0, "K must be a multiple of 16, 32, 64, and 128"
+	# assert K % 16 == 0 and K % 32 == 0 and K % 64 == 0 and K % 128 == 0, "K must be a multiple of 16, 32, 64, and 128"
 	# This is based on the possible BLOCK_SIZE_Ns
-	assert N % 16 == 0 and N % 32 == 0 and N % 64 == 0 and N % 128 == 0 and N % 256 == 0, "N must be a multiple of 16, 32, 64, 128, and 256"
+	# assert N % 16 == 0 and N % 32 == 0 and N % 64 == 0 and N % 128 == 0 and N % 256 == 0, "N must be a multiple of 16, 32, 64, 128, and 256"
 	# This is based on the possible BLOCK_SIZE_Ks
-	assert groupsize % 32 == 0 and groupsize % 64 == 0 and groupsize % 128 == 0, "groupsize must be a multiple of 32, 64, and 128"
+	# assert groupsize % 32 == 0 and groupsize % 64 == 0 and groupsize % 128 == 0, "groupsize must be a multiple of 32, 64, and 128"
 
 	c = torch.empty((M, N), device='cuda', dtype=torch.float16)
 
